@@ -24,8 +24,8 @@ class MaskedAutoencoderViT(nn.Module):
 
     def __init__(
         self,
-        img_size=224,
-        patch_size=16,
+        img_size=32,
+        patch_size=4,
         in_chans=3,
         embed_dim=1024,
         depth=24,

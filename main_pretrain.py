@@ -56,7 +56,7 @@ def get_args_parser():
         "--model", default="mae_vit_large_patch16", type=str, metavar="MODEL", help="Name of model to train"
     )
 
-    parser.add_argument("--input_size", default=224, type=int, help="images input size")
+    parser.add_argument("--input_size", default=32, type=int, help="images input size")
 
     parser.add_argument("--mask_ratio", default=0.75, type=float, help="Masking ratio (percentage of removed patches).")
 
@@ -83,7 +83,7 @@ def get_args_parser():
     parser.add_argument("--warmup_epochs", type=int, default=40, metavar="N", help="epochs to warmup LR")
 
     # Dataset parameters
-    parser.add_argument("--data_path", default="/datasets01/imagenet_full_size/061417/", type=str, help="dataset path")
+    parser.add_argument("--data_path", default="./datasets01/cifar10/", type=str, help="dataset path")
 
     parser.add_argument("--output_dir", default="./output_dir", help="path where to save, empty for no saving")
     parser.add_argument("--log_dir", default="./output_dir", help="path where to tensorboard log")
@@ -134,7 +134,7 @@ def main(args):
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
     )
-    dataset_train = datasets.ImageFolder(os.path.join(args.data_path, "train"), transform=transform_train)
+    dataset_train = datasets.CIFAR10(args.data_path, transform=transform_train, train=True, download=True)
     print(dataset_train)
 
     if True:  # args.distributed:
