@@ -20,7 +20,7 @@ from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 def build_dataset(is_train, args):
     transform = build_transform(is_train, args)
 
-    root = os.path.join(args.data_path, 'train' if is_train else 'val')
+    root = os.path.join(args.data_path, "train" if is_train else "val")
     dataset = datasets.ImageFolder(root, transform=transform)
 
     print(dataset)
@@ -39,7 +39,7 @@ def build_transform(is_train, args):
             is_training=True,
             color_jitter=args.color_jitter,
             auto_augment=args.aa,
-            interpolation='bicubic',
+            interpolation="bicubic",
             re_prob=args.reprob,
             re_mode=args.remode,
             re_count=args.recount,
