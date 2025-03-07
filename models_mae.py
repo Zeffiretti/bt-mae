@@ -14,7 +14,7 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from timm.models.vision_transformer import PatchEmbed, Block
+from timm.models.vision_transformer import PatchEmbed, Block, Attention, Mlp, DropPath
 
 from util.pos_embed import get_2d_sincos_pos_embed
 
@@ -299,3 +299,203 @@ def mae_vit_huge_patch14_dec512d8b(**kwargs):
 mae_vit_base_patch16 = mae_vit_base_patch16_dec512d8b  # decoder: 512 dim, 8 blocks
 mae_vit_large_patch16 = mae_vit_large_patch16_dec512d8b  # decoder: 512 dim, 8 blocks
 mae_vit_huge_patch14 = mae_vit_huge_patch14_dec512d8b  # decoder: 512 dim, 8 blocks
+
+
+# Class for Masked Autoencoder with DeiT-Tiny backbone
+class DeiTBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        mlp_ratio=4.0,
+        qkv_bias=False,
+        norm_layer=nn.LayerNorm,
+        layer_scale_init_value=1e-5,
+        drop_path=0.0,
+    ):
+        super().__init__()
+        self.norm1 = norm_layer(dim)
+        self.attn = Attention(dim, num_heads=num_heads, qkv_bias=qkv_bias)
+        self.norm2 = norm_layer(dim)
+        self.mlp = Mlp(dim, hidden_features=int(dim * mlp_ratio))
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+        # LayerScale参数
+        self.gamma1 = nn.Parameter(layer_scale_init_value * torch.ones(dim))
+        self.gamma2 = nn.Parameter(layer_scale_init_value * torch.ones(dim))
+
+    def forward(self, x):
+        x = x + self.drop_path(self.gamma1 * self.attn(self.norm1(x)))
+        x = x + self.drop_path(self.gamma2 * self.mlp(self.norm2(x)))
+        return x
+
+
+class MaskedAutoencoderDeiT(nn.Module):
+    """Masked Autoencoder with DeiT backbone"""
+
+    def __init__(
+        self,
+        img_size=32,
+        patch_size=4,
+        in_chans=3,
+        embed_dim=768,
+        depth=12,
+        num_heads=12,
+        decoder_embed_dim=512,
+        decoder_depth=8,
+        decoder_num_heads=16,
+        mlp_ratio=4.0,
+        norm_layer=nn.LayerNorm,
+        norm_pix_loss=False,
+        # Deit specific params
+        layer_scale_init_value=1e-5,
+        drop_path_rate=0.0,
+    ):
+        super().__init__()
+
+        # --------------------------------------------------------------------------
+        # MAE encoder specifics
+        self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
+        num_patches = self.patch_embed.num_patches
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, num_patches + 1, embed_dim), requires_grad=False
+        )  # fixed sin-cos embedding
+
+        # Stochastic depth decay rule
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
+
+        # Using DeiT blocks with LayerScale
+        self.blocks = nn.ModuleList(
+            [
+                DeiTBlock(
+                    embed_dim,
+                    num_heads,
+                    mlp_ratio,
+                    qkv_bias=True,
+                    norm_layer=norm_layer,
+                    layer_scale_init_value=layer_scale_init_value,
+                    drop_path=dpr[i],
+                )
+                for i in range(depth)
+            ]
+        )
+        self.norm = norm_layer(embed_dim)
+        # --------------------------------------------------------------------------
+
+        # --------------------------------------------------------------------------
+        # MAE decoder specifics
+        self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
+
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
+
+        self.decoder_pos_embed = nn.Parameter(
+            torch.zeros(1, num_patches + 1, decoder_embed_dim), requires_grad=False
+        )  # fixed sin-cos embedding
+
+        # Decoder also uses DeiT blocks
+        decoder_dpr = [x.item() for x in torch.linspace(0, drop_path_rate, decoder_depth)]
+        self.decoder_blocks = nn.ModuleList(
+            [
+                DeiTBlock(
+                    decoder_embed_dim,
+                    decoder_num_heads,
+                    mlp_ratio,
+                    qkv_bias=True,
+                    norm_layer=norm_layer,
+                    layer_scale_init_value=layer_scale_init_value,
+                    drop_path=decoder_dpr[i],
+                )
+                for i in range(decoder_depth)
+            ]
+        )
+
+        self.decoder_norm = norm_layer(decoder_embed_dim)
+        self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size**2 * in_chans, bias=True)
+        # --------------------------------------------------------------------------
+
+        self.norm_pix_loss = norm_pix_loss
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        torch.nn.init.normal_(self.cls_token, std=0.02)
+        torch.nn.init.normal_(self.mask_token, std=0.02)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            torch.nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    def forward_encoder(self, x, mask_ratio):
+        x = self.patch_embed(x) + self.pos_embed[:, 1:, :]
+        x, mask, ids_restore = self.random_masking(x, mask_ratio)
+        cls_token = self.cls_token + self.pos_embed[:, :1, :]
+        x = torch.cat((cls_token.expand(x.shape[0], -1, -1), x), dim=1)
+        for blk in self.blocks:
+            x = blk(x)
+        return self.norm(x), mask, ids_restore
+
+    def forward_decoder(self, x, ids_restore):
+        x = self.decoder_embed(x)
+        mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
+        x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)
+        x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))
+        x = torch.cat([x[:, :1, :], x_], dim=1) + self.decoder_pos_embed
+        for blk in self.decoder_blocks:
+            x = blk(x)
+        return self.decoder_pred(self.decoder_norm(x))[:, 1:, :]
+
+    def forward(self, imgs, mask_ratio=0.75):
+        latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
+        pred = self.forward_decoder(latent, ids_restore)
+        loss = self.forward_loss(imgs, pred, mask)
+        return loss, pred, mask
+
+    def forward_loss(self, imgs, pred, mask):
+        target = self.patchify(imgs)
+        if self.norm_pix_loss:
+            target = (target - target.mean(dim=-1, keepdim=True)) / (target.var(dim=-1, keepdim=True) + 1.0e-6) ** 0.5
+        loss = ((pred - target) ** 2).mean(dim=-1)
+        return (loss * mask).sum() / mask.sum()
+
+    def patchify(self, imgs):
+        p = self.patch_embed.patch_size[0]
+        h = w = imgs.shape[2] // p
+        x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
+        x = torch.einsum("nchpwq->nhwpqc", x)
+        return x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
+
+    def random_masking(self, x, mask_ratio):
+        N, L, D = x.shape
+        len_keep = int(L * (1 - mask_ratio))
+        noise = torch.rand(N, L, device=x.device)
+        ids_shuffle = torch.argsort(noise, dim=1)
+        ids_restore = torch.argsort(ids_shuffle, dim=1)
+        ids_keep = ids_shuffle[:, :len_keep]
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+        mask = torch.ones([N, L], device=x.device)
+        mask[:, :len_keep] = 0
+        mask = torch.gather(mask, dim=1, index=ids_restore)
+        return x_masked, mask, ids_restore
+
+
+def mae_deit_tiny_patch4_dec512d8b(**kwargs):
+    model = MaskedAutoencoderDeiT(
+        patch_size=4,
+        embed_dim=192,
+        depth=12,
+        num_heads=3,
+        decoder_embed_dim=96,
+        decoder_depth=4,
+        decoder_num_heads=3,
+        mlp_ratio=4,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),
+        **kwargs
+    )
+    return model

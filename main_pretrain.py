@@ -53,7 +53,7 @@ def get_args_parser():
 
     # Model parameters
     parser.add_argument(
-        "--model", default="mae_vit_large_patch16", type=str, metavar="MODEL", help="Name of model to train"
+        "--model", default="mae_deit_tiny_patch4_dec512d8b", type=str, metavar="MODEL", help="Name of model to train"
     )
 
     parser.add_argument("--input_size", default=32, type=int, help="images input size")
