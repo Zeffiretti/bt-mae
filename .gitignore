@@ -1,4 +1,5 @@
 .vscode/
-output_dir/
+output/
+log/
 datasets01/
 __pycache__/

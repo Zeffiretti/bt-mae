@@ -20,6 +20,7 @@ from pathlib import Path
 import torch
 import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
+import torchvision.datasets as datasets
 
 import timm
 
@@ -30,11 +31,12 @@ from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 
 import util.lr_decay as lrd
 import util.misc as misc
-from util.datasets import build_dataset
+from util.datasets import build_dataset, build_transform
 from util.pos_embed import interpolate_pos_embed
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
 import models_vit
+import model_deit
 
 from engine_finetune import train_one_epoch, evaluate
 
@@ -47,7 +49,7 @@ def get_args_parser():
         type=int,
         help="Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus",
     )
-    parser.add_argument("--epochs", default=50, type=int)
+    parser.add_argument("--epochs", default=100, type=int)
     parser.add_argument(
         "--accum_iter",
         default=1,
@@ -56,11 +58,9 @@ def get_args_parser():
     )
 
     # Model parameters
-    parser.add_argument(
-        "--model", default="vit_large_patch16", type=str, metavar="MODEL", help="Name of model to train"
-    )
+    parser.add_argument("--model", default="deit_tiny_patch4", type=str, metavar="MODEL", help="Name of model to train")
 
-    parser.add_argument("--input_size", default=224, type=int, help="images input size")
+    parser.add_argument("--input_size", default=32, type=int, help="images input size")
 
     parser.add_argument("--drop_path", type=float, default=0.1, metavar="PCT", help="Drop path rate (default: 0.1)")
 
@@ -152,11 +152,11 @@ def get_args_parser():
     )
 
     # Dataset parameters
-    parser.add_argument("--data_path", default="/datasets01/imagenet_full_size/061417/", type=str, help="dataset path")
-    parser.add_argument("--nb_classes", default=1000, type=int, help="number of the classification types")
+    parser.add_argument("--data_path", default="./datasets01/cifar10/", type=str, help="dataset path")
+    parser.add_argument("--nb_classes", default=10, type=int, help="number of the classification types")
 
-    parser.add_argument("--output_dir", default="./output_dir", help="path where to save, empty for no saving")
-    parser.add_argument("--log_dir", default="./output_dir", help="path where to tensorboard log")
+    parser.add_argument("--output_dir", default="./output/finetune_dir", help="path where to save, empty for no saving")
+    parser.add_argument("--log_dir", default="./log/finetune_dir", help="path where to tensorboard log")
     parser.add_argument("--device", default="cuda", help="device to use for training / testing")
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--resume", default="", help="resume from checkpoint")
@@ -202,8 +202,11 @@ def main(args):
 
     cudnn.benchmark = True
 
-    dataset_train = build_dataset(is_train=True, args=args)
-    dataset_val = build_dataset(is_train=False, args=args)
+    transform_train = build_transform(is_train=True, args=args)
+    dataset_train = datasets.CIFAR10(args.data_path, transform=transform_train, train=True, download=True)
+
+    transform_val = build_transform(is_train=False, args=args)
+    dataset_val = datasets.CIFAR10(args.data_path, transform=transform_val, train=False, download=True)
 
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
@@ -267,14 +270,18 @@ def main(args):
             num_classes=args.nb_classes,
         )
 
-    model = models_vit.__dict__[args.model](
-        num_classes=args.nb_classes,
-        drop_path_rate=args.drop_path,
-        global_pool=args.global_pool,
-    )
-
+    if args.model.startswith("vit"):
+        model = models_vit.__dict__[args.model](
+            num_classes=args.nb_classes, drop_path_rate=args.drop_path, global_pool=args.global_pool
+        )
+    elif args.model.startswith("deit"):
+        model = model_deit.__dict__[args.model](
+            num_classes=args.nb_classes, drop_path_rate=args.drop_path, global_pool=args.global_pool
+        )
+    else:
+        raise NotImplementedError("Model not implemented")
     if args.finetune and not args.eval:
-        checkpoint = torch.load(args.finetune, map_location="cpu")
+        checkpoint = torch.load(args.finetune, map_location="cpu", weights_only=False)
 
         print("Load pre-trained checkpoint from: %s" % args.finetune)
         checkpoint_model = checkpoint["model"]
@@ -291,13 +298,28 @@ def main(args):
         msg = model.load_state_dict(checkpoint_model, strict=False)
         print(msg)
 
-        if args.global_pool:
-            assert set(msg.missing_keys) == {"head.weight", "head.bias", "fc_norm.weight", "fc_norm.bias"}
-        else:
-            assert set(msg.missing_keys) == {"head.weight", "head.bias"}
-
-        # manually initialize fc layer
-        trunc_normal_(model.head.weight, std=2e-5)
+        if args.model.startswith("deit"):
+            if args.global_pool:
+                assert set(msg.missing_keys) == {
+                    "head.weight",
+                    "head.bias",
+                    "fc_norm.weight",
+                    "fc_norm.bias",
+                    "head_dist.weight",
+                    "head_dist.bias",
+                }
+            else:
+                assert set(msg.missing_keys) == {"head.weight", "head.bias", "head_dist.weight", "head_dist.bias"}
+            # manually initialize fc layer
+            trunc_normal_(model.head.weight, std=2e-5)
+            trunc_normal_(model.head_dist.weight, std=0.02)
+        elif args.model.startswith("vit"):
+            if args.global_pool:
+                assert set(msg.missing_keys) == {"head.weight", "head.bias", "fc_norm.weight", "fc_norm.bias"}
+            else:
+                assert set(msg.missing_keys) == {"head.weight", "head.bias"}
+            # manually initialize fc layer
+            trunc_normal_(model.head.weight, std=2e-5)
 
     model.to(device)
 
@@ -410,5 +432,9 @@ if __name__ == "__main__":
     args = get_args_parser()
     args = args.parse_args()
     if args.output_dir:
+        current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        args.output_dir = os.path.join(args.output_dir, current_time)
+        if args.log_dir:
+            args.log_dir = os.path.join(args.log_dir, current_time)
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)

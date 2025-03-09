@@ -35,6 +35,7 @@ from util.lars import LARS
 from util.crop import RandomResizedCrop
 
 import models_vit
+import model_deit
 
 from engine_finetune import train_one_epoch, evaluate
 
@@ -47,7 +48,7 @@ def get_args_parser():
         type=int,
         help="Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus",
     )
-    parser.add_argument("--epochs", default=90, type=int)
+    parser.add_argument("--epochs", default=100, type=int)
     parser.add_argument(
         "--accum_iter",
         default=1,
@@ -56,9 +57,7 @@ def get_args_parser():
     )
 
     # Model parameters
-    parser.add_argument(
-        "--model", default="vit_large_patch16", type=str, metavar="MODEL", help="Name of model to train"
-    )
+    parser.add_argument("--model", default="deit_tiny_patch4", type=str, metavar="MODEL", help="Name of model to train")
 
     # Optimizer parameters
     parser.add_argument(
@@ -92,11 +91,11 @@ def get_args_parser():
     )
 
     # Dataset parameters
-    parser.add_argument("--data_path", default="/datasets01/imagenet_full_size/061417/", type=str, help="dataset path")
-    parser.add_argument("--nb_classes", default=1000, type=int, help="number of the classification types")
+    parser.add_argument("--data_path", default="./datasets01/cifar10/", type=str, help="dataset path")
+    parser.add_argument("--nb_classes", default=10, type=int, help="number of the classification types")
 
-    parser.add_argument("--output_dir", default="./output_dir", help="path where to save, empty for no saving")
-    parser.add_argument("--log_dir", default="./output_dir", help="path where to tensorboard log")
+    parser.add_argument("--output_dir", default="./output/linprobe_dir", help="path where to save, empty for no saving")
+    parser.add_argument("--log_dir", default="./log/linprobe_dir", help="path where to tensorboard log")
     parser.add_argument("--device", default="cuda", help="device to use for training / testing")
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--resume", default="", help="resume from checkpoint")
@@ -145,22 +144,22 @@ def main(args):
     # linear probe: weak augmentation
     transform_train = transforms.Compose(
         [
-            RandomResizedCrop(224, interpolation=3),
+            RandomResizedCrop(32, interpolation=3),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
     )
+    dataset_train = datasets.CIFAR10(args.data_path, transform=transform_train, train=True, download=True)
     transform_val = transforms.Compose(
         [
-            transforms.Resize(256, interpolation=3),
-            transforms.CenterCrop(224),
+            transforms.Resize(36, interpolation=3),
+            transforms.CenterCrop(32),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
     )
-    dataset_train = datasets.ImageFolder(os.path.join(args.data_path, "train"), transform=transform_train)
-    dataset_val = datasets.ImageFolder(os.path.join(args.data_path, "val"), transform=transform_val)
+    dataset_val = datasets.CIFAR10(args.data_path, transform=transform_val, train=False, download=True)
     print(dataset_train)
     print(dataset_val)
 
@@ -211,13 +210,21 @@ def main(args):
         drop_last=False,
     )
 
-    model = models_vit.__dict__[args.model](
-        num_classes=args.nb_classes,
-        global_pool=args.global_pool,
-    )
+    if args.model.startswith("deit"):
+        model = model_deit.__dict__[args.model](
+            num_classes=args.nb_classes,
+            global_pool=args.global_pool,
+        )
+    elif args.model.startswith("vit"):
+        model = models_vit.__dict__[args.model](
+            num_classes=args.nb_classes,
+            global_pool=args.global_pool,
+        )
+    else:
+        raise NotImplementedError("Model not supported: {}".format(args.model))
 
     if args.finetune and not args.eval:
-        checkpoint = torch.load(args.finetune, map_location="cpu")
+        checkpoint = torch.load(args.finetune, map_location="cpu", weights_only=False)
 
         print("Load pre-trained checkpoint from: %s" % args.finetune)
         checkpoint_model = checkpoint["model"]
@@ -234,13 +241,28 @@ def main(args):
         msg = model.load_state_dict(checkpoint_model, strict=False)
         print(msg)
 
-        if args.global_pool:
-            assert set(msg.missing_keys) == {"head.weight", "head.bias", "fc_norm.weight", "fc_norm.bias"}
-        else:
-            assert set(msg.missing_keys) == {"head.weight", "head.bias"}
-
-        # manually initialize fc layer: following MoCo v3
-        trunc_normal_(model.head.weight, std=0.01)
+        if args.model.startswith("deit"):
+            if args.global_pool:
+                assert set(msg.missing_keys) == {
+                    "head.weight",
+                    "head.bias",
+                    "fc_norm.weight",
+                    "fc_norm.bias",
+                    "head_dist.weight",
+                    "head_dist.bias",
+                }
+            else:
+                assert set(msg.missing_keys) == {"head.weight", "head.bias", "head_dist.weight", "head_dist.bias"}
+            # manually initialize fc layer
+            trunc_normal_(model.head.weight, std=2e-5)
+            trunc_normal_(model.head_dist.weight, std=0.02)
+        elif args.model.startswith("vit"):
+            if args.global_pool:
+                assert set(msg.missing_keys) == {"head.weight", "head.bias", "fc_norm.weight", "fc_norm.bias"}
+            else:
+                assert set(msg.missing_keys) == {"head.weight", "head.bias"}
+            # manually initialize fc layer
+            trunc_normal_(model.head.weight, std=2e-5)
 
     # for linear prob only
     # hack: revise model's head with BN
@@ -349,5 +371,9 @@ if __name__ == "__main__":
     args = get_args_parser()
     args = args.parse_args()
     if args.output_dir:
+        current_time = datetime.datetime.now().strftime("%b%d_%H-%M-%S")
+        args.output_dir = os.path.join(args.output_dir, current_time)
+        if args.log_dir:
+            args.log_dir = os.path.join(args.log_dir, current_time)
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)

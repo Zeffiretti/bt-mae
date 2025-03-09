@@ -43,7 +43,7 @@ def get_args_parser():
         type=int,
         help="Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus",
     )
-    parser.add_argument("--epochs", default=400, type=int)
+    parser.add_argument("--epochs", default=200, type=int)
     parser.add_argument(
         "--accum_iter",
         default=1,
@@ -53,7 +53,7 @@ def get_args_parser():
 
     # Model parameters
     parser.add_argument(
-        "--model", default="mae_deit_tiny_patch4_dec512d8b", type=str, metavar="MODEL", help="Name of model to train"
+        "--model", default="mae_deit_tiny_patch4", type=str, metavar="MODEL", help="Name of model to train"
     )
 
     parser.add_argument("--input_size", default=32, type=int, help="images input size")
@@ -85,8 +85,8 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument("--data_path", default="./datasets01/cifar10/", type=str, help="dataset path")
 
-    parser.add_argument("--output_dir", default="./output_dir", help="path where to save, empty for no saving")
-    parser.add_argument("--log_dir", default="./output_dir", help="path where to tensorboard log")
+    parser.add_argument("--output_dir", default="./output/pretrain_dir", help="path where to save, empty for no saving")
+    parser.add_argument("--log_dir", default="./log/pretrain_dir", help="path where to tensorboard log")
     parser.add_argument("--device", default="cuda", help="device to use for training / testing")
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--resume", default="", help="resume from checkpoint")
@@ -231,5 +231,9 @@ if __name__ == "__main__":
     args = get_args_parser()
     args = args.parse_args()
     if args.output_dir:
+        current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        args.output_dir = os.path.join(args.output_dir, current_time)
+        if args.log_dir:
+            args.log_dir = os.path.join(args.log_dir, current_time)
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)
