@@ -298,11 +298,12 @@ def get_grad_norm_(parameters, norm_type: float = 2.0) -> torch.Tensor:
     return total_norm
 
 
-def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler):
+def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, bootstrap_idx=None):
     output_dir = Path(args.output_dir)
     epoch_name = str(epoch)
+    bootstrap_name = str(bootstrap_idx) if bootstrap_idx is not None else "none"
     if loss_scaler is not None:
-        checkpoint_paths = [output_dir / ("checkpoint-%s.pth" % epoch_name)]
+        checkpoint_paths = [output_dir / ("checkpoint-%s-%s.pth" % (bootstrap_name, epoch_name))]
         for checkpoint_path in checkpoint_paths:
             to_save = {
                 "model": model_without_ddp.state_dict(),
@@ -310,12 +311,15 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler):
                 "epoch": epoch,
                 "scaler": loss_scaler.state_dict(),
                 "args": args,
+                "bootstrap_idx": bootstrap_idx,
             }
 
             save_on_master(to_save, checkpoint_path)
     else:
-        client_state = {"epoch": epoch}
-        model.save_checkpoint(save_dir=args.output_dir, tag="checkpoint-%s" % epoch_name, client_state=client_state)
+        client_state = {"epoch": epoch, "bootstrap_idx": bootstrap_idx}
+        model.save_checkpoint(
+            save_dir=args.output_dir, tag="checkpoint-%s-%s" % (bootstrap_name, epoch_name), client_state=client_state
+        )
 
 
 def load_model(args, model_without_ddp, optimizer, loss_scaler):
@@ -332,6 +336,17 @@ def load_model(args, model_without_ddp, optimizer, loss_scaler):
             if "scaler" in checkpoint:
                 loss_scaler.load_state_dict(checkpoint["scaler"])
             print("With optim & sched!")
+
+
+def create_model(model_init: callable, args, bootstrap=False, target_encoder=None, device="cuda"):
+    if bootstrap:
+        assert target_encoder is not None, "target_encoder must be provided for bootstrapping"
+        model = model_init(norm_pix_loss=args.norm_pix_loss, target_encoder=target_encoder)
+        # model.load_state_dict(target_encoder.state_dict())
+    else:
+        model = model_init(norm_pix_loss=args.norm_pix_loss)
+    model.to(device)
+    return model
 
 
 def all_reduce_mean(x):

@@ -27,7 +27,9 @@ def train_one_epoch(
     loss_scaler,
     log_writer=None,
     args=None,
+    bootstrap_idx: int = 0,
 ):
+
     model.train(True)
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter("lr", misc.SmoothedValue(window_size=1, fmt="{value:.6f}"))

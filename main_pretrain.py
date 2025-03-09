@@ -31,6 +31,7 @@ import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
 import models_mae
+import models_bmae
 
 from engine_pretrain import train_one_epoch
 
@@ -44,6 +45,7 @@ def get_args_parser():
         help="Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus",
     )
     parser.add_argument("--epochs", default=200, type=int)
+    parser.add_argument("--num_bootstrap", default=4, type=int)
     parser.add_argument(
         "--accum_iter",
         default=1,
@@ -53,7 +55,7 @@ def get_args_parser():
 
     # Model parameters
     parser.add_argument(
-        "--model", default="mae_deit_tiny_patch4", type=str, metavar="MODEL", help="Name of model to train"
+        "--model", default="bmae_deit_tiny_patch4", type=str, metavar="MODEL", help="Name of model to train"
     )
 
     parser.add_argument("--input_size", default=32, type=int, help="images input size")
@@ -80,7 +82,7 @@ def get_args_parser():
         "--min_lr", type=float, default=0.0, metavar="LR", help="lower lr bound for cyclic schedulers that hit 0"
     )
 
-    parser.add_argument("--warmup_epochs", type=int, default=40, metavar="N", help="epochs to warmup LR")
+    parser.add_argument("--warmup_epochs", type=int, default=10, metavar="N", help="epochs to warmup LR")
 
     # Dataset parameters
     parser.add_argument("--data_path", default="./datasets01/cifar10/", type=str, help="dataset path")
@@ -163,9 +165,14 @@ def main(args):
     )
 
     # define the model
-    model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss)
-
-    model.to(device)
+    if args.model.startswith("bmae"):
+        model_init = models_bmae.__dict__[args.model]
+    elif args.model.startswith("mae"):
+        model_init = models_mae.__dict__[args.model]
+    else:
+        raise ValueError("Unknown model type: {}".format(args.model))
+    # model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss)
+    model = misc.create_model(model_init, args, bootstrap=False, device=device)
 
     model_without_ddp = model
     print("Model = %s" % str(model_without_ddp))
@@ -193,15 +200,22 @@ def main(args):
 
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
-    print(f"Start training for {args.epochs} epochs")
+    print(f"Start training for {args.epochs} epochs in {args.num_bootstrap} bootstraps")
+    epoches_per_bootstrap = args.epochs // args.num_bootstrap
+    trained_models = []
+
     start_time = time.time()
-    for epoch in range(args.start_epoch, args.epochs):
+    if args.num_bootstrap > 1:
+        print("Bootstrap training: Train Regular MAE (MAE-1)")
+    for epoch in range(args.start_epoch, epoches_per_bootstrap):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
+
         train_stats = train_one_epoch(
             model, data_loader_train, optimizer, device, epoch, loss_scaler, log_writer=log_writer, args=args
         )
-        if args.output_dir and (epoch % 20 == 0 or epoch + 1 == args.epochs):
+
+        if args.output_dir and ((epoch + 1) % epoches_per_bootstrap == 0 or epoch + 1 == args.epochs):
             misc.save_model(
                 args=args,
                 model=model,
@@ -209,7 +223,60 @@ def main(args):
                 optimizer=optimizer,
                 loss_scaler=loss_scaler,
                 epoch=epoch,
+                bootstrap_idx=1,
             )
+            trained_models.append(model)
+
+        log_stats = {
+            **{f"train_{k}": v for k, v in train_stats.items()},
+            "epoch": epoch,
+        }
+
+        if args.output_dir and misc.is_main_process():
+            if log_writer is not None:
+                log_writer.flush()
+            with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
+                f.write(json.dumps(log_stats) + "\n")
+
+    bootstrapped_start_epoch = epoches_per_bootstrap
+    for epoch in range(epoches_per_bootstrap, args.epochs):
+        if epoch % epoches_per_bootstrap == 0:
+            bootstrap_idx = epoch // epoches_per_bootstrap + 1
+            bootstrapped_start_epoch = epoch
+            bootstrapped_model = misc.create_model(
+                model_init, args, bootstrap=True, target_encoder=trained_models[-1], device=device
+            )
+            model_without_ddp = bootstrapped_model
+            print(f"Bootstrap {bootstrap_idx} training: Train MAE-{bootstrap_idx}")
+            optimizer = torch.optim.AdamW(bootstrapped_model.parameters(), lr=args.lr, betas=(0.9, 0.95))
+            loss_scaler = NativeScaler()
+            print(optimizer)
+        if args.distributed:
+            data_loader_train.sampler.set_epoch(epoch)
+
+        train_stats = train_one_epoch(
+            bootstrapped_model,
+            data_loader_train,
+            optimizer,
+            device,
+            epoch - bootstrapped_start_epoch,
+            loss_scaler,
+            log_writer=log_writer,
+            args=args,
+            bootstrap_idx=bootstrap_idx,
+        )
+
+        if args.output_dir and ((epoch + 1) % epoches_per_bootstrap == 0 or epoch + 1 == args.epochs):
+            misc.save_model(
+                args=args,
+                model=model,
+                model_without_ddp=model_without_ddp,
+                optimizer=optimizer,
+                loss_scaler=loss_scaler,
+                epoch=epoch,
+                bootstrap_idx=bootstrap_idx,
+            )
+            trained_models.append(bootstrapped_model)
 
         log_stats = {
             **{f"train_{k}": v for k, v in train_stats.items()},
