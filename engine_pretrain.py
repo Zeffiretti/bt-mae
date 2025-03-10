@@ -26,6 +26,7 @@ def train_one_epoch(
     epoch: int,
     loss_scaler,
     log_writer=None,
+    model_ema=None,
     args=None,
 ):
 
@@ -36,6 +37,9 @@ def train_one_epoch(
     print_freq = 20
 
     accum_iter = args.accum_iter
+
+    if model_ema is not None:
+        model.update_ema_model(model_ema)
 
     optimizer.zero_grad()
 
@@ -63,6 +67,9 @@ def train_one_epoch(
         loss_scaler(loss, optimizer, parameters=model.parameters(), update_grad=(data_iter_step + 1) % accum_iter == 0)
         if (data_iter_step + 1) % accum_iter == 0:
             optimizer.zero_grad()
+
+        if model_ema is not None:
+            model_ema.update(model)
 
         torch.cuda.synchronize()
 

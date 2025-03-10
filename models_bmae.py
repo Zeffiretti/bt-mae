@@ -37,6 +37,7 @@ class BootMAEDeiT(MaskedAutoencoderDeiT):
         layer_scale_init_value=1e-5,
         drop_path_rate=0.0,
         enable_ema=False,
+        use_new_feature_predictor=False,
     ):
         super().__init__(
             img_size=img_size,
@@ -58,92 +59,109 @@ class BootMAEDeiT(MaskedAutoencoderDeiT):
 
         self.target_encoder = target_encoder
         self.target_layer_index = target_layer_index
+
         self.enable_ema = enable_ema
+        self.use_new_feature_decoder = use_new_feature_predictor
         if target_encoder is not None:
-            # Get feature dimension from the target encoder if not provided
             if feature_dim is None:
                 # Default to the same dimension as the encoder output
                 feature_dim = target_encoder.blocks[target_layer_index].norm2.normalized_shape[0]
+            if not self.use_new_feature_decoder:
+                # Get feature dimension from the target encoder if not provided
 
-            # Replace the decoder prediction head to match target feature dimensions
-            self.decoder_pred = nn.Linear(self.decoder_blocks[-1].norm2.normalized_shape[0], feature_dim, bias=True)
+                # Replace the decoder prediction head to match target feature dimensions
+                self.decoder_pred = nn.Linear(self.decoder_blocks[-1].norm2.normalized_shape[0], feature_dim, bias=True)
 
-            # initialize nn.Linear and nn.LayerNorm
-            self.apply(self._init_weights)
+                # initialize nn.Linear and nn.LayerNorm
+                self.apply(self._init_weights)
 
-            # self.init_feature_extraction_weights()
+                # self.init_feature_extraction_weights()
 
-            # Freeze the target encoder
-            for param in self.target_encoder.parameters():
-                param.requires_grad = False
+                # Freeze the target encoder
+                for param in self.target_encoder.parameters():
+                    param.requires_grad = False
+            else:
+                # build new feature predictor
+                self.feature_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
+                self.feature_mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
+                self.feature_pos_embed = nn.Parameter(
+                    torch.zeros(1, self.patch_embed.num_patches + 1, target_encoder.embed_dim), requires_grad=False
+                )
+                feature_depth = decoder_depth // 2
+                feature_dpr = [x.item() for x in torch.linspace(0, drop_path_rate, feature_depth)]
+                self.feature_blocks = nn.ModuleList(
+                    [
+                        Block(
+                            dim=target_encoder.embed_dim,
+                            num_heads=decoder_num_heads,
+                            mlp_ratio=mlp_ratio,
+                            qkv_bias=True,
+                            drop=drop_path_rate,
+                            attn_drop=drop_path_rate,
+                            drop_path=dpr,
+                            norm_layer=norm_layer,
+                        )
+                        for dpr in feature_dpr
+                    ]
+                )
+                self.feature_norm = norm_layer(target_encoder.embed_dim)
+                self.feature_pred = nn.Linear(target_encoder.embed_dim, feature_dim, bias=True)
 
-        # if target_encoder is not None or enable_ema:
-        #     self.target_encoder.eval()
-        #     # Get feature dimension from the target encoder if not provided
-        #     if feature_dim is None:
-        #         # Default to the same dimension as the encoder output
-        #         feature_dim = embed_dim
-        #         print(f"Using target encoder feature dimension: {feature_dim}")
-        #     feature_embed_dim = decoder_embed_dim
-        #     feature_depth = 2
+                torch.nn.init.normal_(self.feature_mask_token, std=0.02)
 
-        #     # self.feature_pred = nn.Linear(feature_dim, feature_dim, bias=True)
-        #     # --------------------------------------------------------------------------
-        #     # Feature predict specifics
-        #     num_patches = self.patch_embed.num_patches
-        #     self.feature_embed = nn.Linear(embed_dim, feature_embed_dim, bias=True)
+                self.init_feature_extraction_weights()
 
-        #     self.feature_mask_token = nn.Parameter(torch.zeros(1, 1, feature_embed_dim))
+        if self.enable_ema:
+            # To keep MAE reconstruction ability, we need to keep the target decoder to learn pixel reconstruction
+            # Meanwhile, we create new feature decoder to learn feature reconstruction (a shallow decoder)
+            self.use_new_feature_decoder = True
+            self.target_encoder = None
 
-        #     self.feature_pos_embed = nn.Parameter(
-        #         torch.zeros(1, num_patches + 1, feature_embed_dim), requires_grad=False
-        #     )  # fixed sin-cos embedding
+            if feature_dim is None:
+                feature_dim = self.blocks[target_layer_index].norm2.normalized_shape[0]
 
-        #     feature_dpr = [x.item() for x in torch.linspace(0, drop_path_rate, feature_depth)]
-        #     self.feature_blocks = nn.ModuleList(
-        #         [
-        #             Block(
-        #                 decoder_embed_dim,
-        #                 decoder_num_heads,
-        #                 mlp_ratio,
-        #                 qkv_bias=True,
-        #                 norm_layer=norm_layer,
-        #                 drop_path=feature_dpr[i],
-        #             )
-        #             for i in range(feature_depth)
-        #         ]
-        #     )
+            self.feature_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
+            self.feature_mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
 
-        #     self.feature_norm = norm_layer(decoder_embed_dim)
-        #     self.feature_pred = nn.Linear(decoder_embed_dim, patch_size**2 * in_chans * 4, bias=True)
-        #     # --------------------------------------------------------------------------
+            # self.apply(self._init_weights)
+            self.feature_pos_embed = nn.Parameter(
+                torch.zeros(1, self.patch_embed.num_patches + 1, decoder_embed_dim), requires_grad=False
+            )
+            feature_depth = decoder_depth // 2
+            feature_dpr = [x.item() for x in torch.linspace(0, drop_path_rate, feature_depth)]
+            self.feature_blocks = nn.ModuleList(
+                [
+                    Block(
+                        dim=decoder_embed_dim,
+                        num_heads=decoder_num_heads,
+                        mlp_ratio=mlp_ratio,
+                        qkv_bias=True,
+                        drop=drop_path_rate,
+                        attn_drop=drop_path_rate,
+                        drop_path=dpr,
+                        norm_layer=norm_layer,
+                    )
+                    for dpr in feature_dpr
+                ]
+            )
+            self.feature_norm = norm_layer(decoder_embed_dim)
+            self.feature_pred = nn.Linear(decoder_embed_dim, feature_dim, bias=True)
 
-        #     self.init_feature_extraction_weights()
+            torch.nn.init.normal_(self.feature_mask_token, std=0.02)
 
-        #     # Freeze the target encoder
-        #     for param in self.target_encoder.parameters():
-        #         param.requires_grad = False
+            self.init_feature_extraction_weights()
 
     def init_feature_extraction_weights(self):
-        # Initialize feature extraction weights to match the target encoder
-        if self.target_encoder is not None or self.enable_ema:
-            # self.pos_embed.copy_(self.target_encoder.pos_embed)
-            # self.cls_token.copy_(self.target_encoder.cls_token)
-            # for i, blk in enumerate(self.blocks):
-            #     if i >= len(self.target_encoder.blocks):
-            #         break
-            #     blk.load_state_dict(self.target_encoder.blocks[i].state_dict())
+        feature_pos_embed = get_2d_sincos_pos_embed(
+            self.decoder_pos_embed.shape[-1],
+            int((self.patch_embed.num_patches + 2) ** 0.5),
+            cls_token=True,
+            distill_token=False,
+        )
+        self.feature_pos_embed.copy_(torch.from_numpy(feature_pos_embed).float().unsqueeze(0))
 
-            feature_pos_embed = get_2d_sincos_pos_embed(
-                self.decoder_pos_embed.shape[-1],
-                int((self.patch_embed.num_patches + 2) ** 0.5),
-                cls_token=True,
-                distill_token=False,
-            )
-            self.feature_pos_embed.copy_(torch.from_numpy(feature_pos_embed).float().unsqueeze(0))
-
-            # initialize nn.Linear and nn.LayerNorm
-            self.apply(self._init_weights)
+        # initialize nn.Linear and nn.LayerNorm
+        self.apply(self._init_weights)
 
     def extract_target_features(self, imgs, mask, ids_restore=None):
         """Extract features from the target encoder to use as reconstruction targets"""
@@ -169,50 +187,73 @@ class BootMAEDeiT(MaskedAutoencoderDeiT):
             return self.patchify(imgs)
 
         with torch.no_grad():
-            # Forward pass through target encoder without masking (mask_ratio=0)
-            x = self.target_encoder.patch_embed(imgs) + self.target_encoder.pos_embed[:, 2:, :]
+            if not self.enable_ema:  # standard bootstrapped MAE
+                # Forward pass through target encoder without masking (mask_ratio=0)
+                self.target_encoder.eval()
+                x = self.target_encoder.patch_embed(imgs) + self.target_encoder.pos_embed[:, 2:, :]
 
-            # No masking for target feature extraction
-            # Append cls token
-            cls_token = self.target_encoder.cls_token + self.target_encoder.pos_embed[:, :1, :]
-            x = torch.cat((cls_token.expand(x.shape[0], -1, -1), x), dim=1)
+                # No masking for target feature extraction
+                # Append cls token
+                cls_token = self.target_encoder.cls_token + self.target_encoder.pos_embed[:, :1, :]
+                x = torch.cat((cls_token.expand(x.shape[0], -1, -1), x), dim=1)
 
-            # Pass through encoder blocks up to the target layer
-            for i, blk in enumerate(self.target_encoder.blocks):
-                x = blk(x)
-                if i == self.target_layer_index:
-                    break
+                # Pass through encoder blocks up to the target layer
+                for i, blk in enumerate(self.target_encoder.blocks):
+                    x = blk(x)
+                    if i == self.target_layer_index:
+                        break
 
-            # Apply norm layer
-            features = self.target_encoder.norm(x)
+                # Apply norm layer
+                features = self.target_encoder.norm(x)
 
-            # Return only patch features (exclude cls token)
-            return features[:, 1:, :]
+                # Return only patch features (exclude cls token)
+                return features[:, 1:, :]
+            else:  # bootstrapped MAE with EMA target encoder
+                ema = self.target_encoder.ema
+                ema.eval()
+                x = ema.patch_embed(imgs) + ema.pos_embed[:, 2:, :]
+                cls_token = ema.cls_token + ema.pos_embed[:, :1, :]
+                x = torch.cat((cls_token.expand(x.shape[0], -1, -1), x), dim=1)
 
-    # def forward(self, imgs, mask_ratio=0.75, model_ema=None):
-    #     latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
-    #     # if self.target_encoder is not None:
-    #     #     with torch.no_grad():
-    #     #         feature_target = self.target_encoder.extract_target_features(imgs, mask, ids_restore)
-    #     #     feature_pred = self.forward_features(latent, ids_restore)
-    #     #     pred = self.forward_decoder(latent, ids_restore)
-    #     #     loss = self.forward_loss(imgs, pred, mask, feature_target, feature_pred)
-    #     if self.target_encoder is not None:
-    #         with torch.no_grad():
-    #             feature_target = self.extract_midlayer_features(imgs)
-    #         # feature_pred = self.forward_features(latent, ids_restore)
-    #         pred = self.forward_decoder(latent, ids_restore)
-    #         loss = self.forward_loss(feature_target, pred, mask)
-    #     elif self.enable_ema and model_ema is not None:
-    #         with torch.no_grad():
-    #             feature_target = model_ema.extract_target_features(imgs, mask, ids_restore)
-    #         feature_pred = self.forward_features(latent, ids_restore)
-    #         pred = self.forward_decoder(latent, ids_restore)
-    #         loss = self.forward_loss(imgs, pred, mask, feature_target, feature_pred)
-    #     else:
-    #         pred = self.forward_decoder(latent, ids_restore)
-    #         loss = self.forward_loss(imgs, pred, mask)
-    #     return loss, pred, mask
+                for i, blk in enumerate(ema.blocks):
+                    x = blk(x)
+                    if i == self.target_layer_index:
+                        break
+
+                features = ema.norm(x)
+
+                return features[:, 1:, :]
+
+    def forward(self, imgs, mask_ratio=0.15):
+        # latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
+        # pred = self.forward_decoder(latent, ids_restore)
+        # loss = self.forward_loss(imgs, pred, mask)  # reconstruct pixel loss
+
+        if self.use_new_feature_decoder:
+            latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
+            pred = self.forward_decoder(latent, ids_restore)
+            target = self.patchify(imgs)
+
+            if self.target_encoder is None and self.norm_pix_loss:
+                # Only normalize pixel values if using pixel reconstruction (no target encoder)
+                mean = target.mean(dim=-1, keepdim=True)
+                var = target.var(dim=-1, keepdim=True)
+                target = (target - mean) / (var + 1.0e-6) ** 0.5
+
+            # pixel loss
+            loss = (pred - target) ** 2
+            loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
+
+            feature_target = self.extract_midlayer_features(imgs)
+            feature_pred = self.forward_features(latent, ids_restore)
+            feature_loss = (feature_pred - feature_target) ** 2
+            feature_loss = feature_loss.mean(dim=-1)  # [N, L], mean loss per patch
+            loss = loss + feature_loss
+
+            return loss.mean(), pred, mask
+        else:
+
+            return super().forward(imgs, mask_ratio=mask_ratio)
 
     def forward_loss(self, imgs, pred, mask, feature_target=None, feature_pred=None):
         target = self.extract_midlayer_features(imgs)
@@ -259,10 +300,14 @@ class BootMAEDeiT(MaskedAutoencoderDeiT):
         # remove target encoder from state dict, to avoid size inflation when saving
         if self.target_encoder is not None:
             for key in list(state_dict.keys()):
-                if key.startswith("target_encoder.") or key.startswith("feature"):
+                if key.startswith("target_encoder."):
                     state_dict.pop(key)
 
         return state_dict
+
+    def update_ema_model(self, ema_model):
+        print("EMA model updated")
+        self.target_encoder = ema_model
 
 
 def bmae_deit_tiny_patch4_dec512d8b(**kwargs):
@@ -281,4 +326,22 @@ def bmae_deit_tiny_patch4_dec512d8b(**kwargs):
     return model
 
 
+def bmae_ema_deit_tiny_patch4_dec512d8b(**kwargs):
+    model = BootMAEDeiT(
+        patch_size=4,
+        embed_dim=192,
+        depth=12,
+        num_heads=3,
+        decoder_embed_dim=512,
+        decoder_depth=8,
+        decoder_num_heads=16,
+        mlp_ratio=4,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),
+        enable_ema=True,
+        **kwargs,
+    )
+    return model
+
+
 bmae_deit_tiny_patch4 = bmae_deit_tiny_patch4_dec512d8b
+# bmae_ema_deit_tiny_patch4 = bmae_ema_deit_tiny_patch4_dec512d8b

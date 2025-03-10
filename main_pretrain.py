@@ -26,6 +26,7 @@ import timm
 
 assert timm.__version__ == "0.3.2"  # version check
 import timm.optim.optim_factory as optim_factory
+from timm.utils.model_ema import ModelEma
 
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
@@ -46,6 +47,10 @@ def get_args_parser():
     )
     parser.add_argument("--epochs", default=200, type=int)
     parser.add_argument("--num_bootstrap", default=4, type=int)
+    parser.add_argument("--enable_ema", action="store_true", help="Enable exponential moving average")
+    parser.set_defaults(enable_ema=False)
+    parser.add_argument("--ema_decay", default=0.9999, type=float, help="Decay factor for EMA")
+
     parser.add_argument(
         "--accum_iter",
         default=1,
@@ -164,6 +169,10 @@ def main(args):
         drop_last=True,
     )
 
+    if args.enable_ema:
+        print("Enable EMA")
+        args.num_bootstrap = 1  # At most one mode at the same time
+
     # define the model
     if args.model.startswith("bmae"):
         model_init = models_bmae.__dict__[args.model]
@@ -200,6 +209,10 @@ def main(args):
 
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
+    model_ema = None
+    if args.enable_ema:
+        model_ema = ModelEma(model=model, decay=args.ema_decay, device=device)
+
     print(f"Start training for {args.epochs} epochs in {args.num_bootstrap} bootstraps")
     epoches_per_bootstrap = args.epochs // args.num_bootstrap
     trained_models = []
@@ -207,12 +220,23 @@ def main(args):
     start_time = time.time()
     if args.num_bootstrap > 1:
         print("Bootstrap training: Train Regular MAE (MAE-1)")
+    elif args.enable_ema:
+        print("Train MAE with EMA")
+
     for epoch in range(args.start_epoch, epoches_per_bootstrap):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
 
         train_stats = train_one_epoch(
-            model, data_loader_train, optimizer, device, epoch, loss_scaler, log_writer=log_writer, args=args
+            model,
+            data_loader_train,
+            optimizer,
+            device,
+            epoch,
+            loss_scaler,
+            log_writer=log_writer,
+            model_ema=model_ema,
+            args=args,
         )
 
         if args.output_dir and ((epoch + 1) % epoches_per_bootstrap == 0 or epoch + 1 == args.epochs):

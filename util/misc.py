@@ -350,7 +350,7 @@ def create_model(model_init: callable, args, bootstrap=False, target_encoder=Non
                 del state_dict[key]
         model.load_state_dict(state_dict, strict=False)
     else:
-        model = model_init(norm_pix_loss=args.norm_pix_loss)
+        model = model_init(norm_pix_loss=args.norm_pix_loss, enable_ema=args.enable_ema)
     model.to(device)
     return model
 
