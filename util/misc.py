@@ -342,7 +342,13 @@ def create_model(model_init: callable, args, bootstrap=False, target_encoder=Non
     if bootstrap:
         assert target_encoder is not None, "target_encoder must be provided for bootstrapping"
         model = model_init(norm_pix_loss=args.norm_pix_loss, target_encoder=target_encoder)
-        model.load_state_dict(target_encoder.state_dict(), strict=False)
+        # remove decoder params
+        state_dict = target_encoder.state_dict()
+        for key, _ in list(state_dict.items()):
+            if "decoder" in key and state_dict[key].shape != model.state_dict()[key].shape:
+                print(f"Removing {key} from state_dict")
+                del state_dict[key]
+        model.load_state_dict(state_dict, strict=False)
     else:
         model = model_init(norm_pix_loss=args.norm_pix_loss)
     model.to(device)

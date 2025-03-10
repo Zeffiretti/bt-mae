@@ -27,7 +27,6 @@ def train_one_epoch(
     loss_scaler,
     log_writer=None,
     args=None,
-    bootstrap_idx: int = 0,
 ):
 
     model.train(True)

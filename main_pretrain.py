@@ -267,7 +267,7 @@ def main(args):
             loss_scaler,
             log_writer=log_writer,
             args=args,
-            bootstrap_idx=bootstrap_idx,
+            # bootstrap_idx=bootstrap_idx,
         )
 
         if args.output_dir and ((epoch + 1) % epoches_per_bootstrap == 0 or epoch + 1 == args.epochs):
