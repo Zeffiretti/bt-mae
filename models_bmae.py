@@ -4,6 +4,7 @@ from torch import nn
 
 from models_mae import MaskedAutoencoderDeiT
 from util import misc
+from timm.models.vision_transformer import PatchEmbed, Block, Attention, Mlp, DropPath
 
 
 class BootstrappedMaskedAutoencoderDeiT(MaskedAutoencoderDeiT):
@@ -18,9 +19,39 @@ class BootstrappedMaskedAutoencoderDeiT(MaskedAutoencoderDeiT):
         target_encoder=None,  # Pretrained MAE encoder to extract target features
         target_layer_index=-1,  # Which encoder layer to extract features from (-1 means the last layer)
         feature_dim=None,  # Dimension of target encoder features (if None, use patch_size^2 * in_chans)
-        **kwargs,
+        img_size=32,
+        patch_size=4,
+        in_chans=3,
+        embed_dim=768,
+        depth=12,
+        num_heads=12,
+        decoder_embed_dim=512,
+        decoder_depth=8,
+        decoder_num_heads=16,
+        mlp_ratio=4.0,
+        norm_layer=nn.LayerNorm,
+        norm_pix_loss=False,
+        # Deit specific params
+        layer_scale_init_value=1e-5,
+        drop_path_rate=0.0,
     ):
-        super().__init__(**kwargs)
+        super().__init__(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_chans=in_chans,
+            embed_dim=embed_dim,
+            depth=depth,
+            num_heads=num_heads,
+            decoder_embed_dim=decoder_embed_dim,
+            decoder_depth=decoder_depth,
+            decoder_num_heads=decoder_num_heads,
+            mlp_ratio=mlp_ratio,
+            norm_layer=norm_layer,
+            norm_pix_loss=norm_pix_loss,
+            # Deit specific params
+            layer_scale_init_value=layer_scale_init_value,
+            drop_path_rate=drop_path_rate,
+        )
 
         self.target_encoder = target_encoder
         self.target_layer_index = target_layer_index
@@ -28,60 +59,127 @@ class BootstrappedMaskedAutoencoderDeiT(MaskedAutoencoderDeiT):
         # If we're using a target encoder, we need to modify the decoder prediction head
         # to output features with the same dimension as the target encoder
         if target_encoder is not None:
+            self.target_encoder.eval()
             # Get feature dimension from the target encoder if not provided
             if feature_dim is None:
                 # Default to the same dimension as the encoder output
-                feature_dim = target_encoder.blocks[target_layer_index].norm2.normalized_shape[0]
+                feature_dim = embed_dim
+                print(f"Using target encoder feature dimension: {feature_dim}")
+            feature_embed_dim = decoder_embed_dim
+            feature_depth = decoder_depth
 
-            # Replace the decoder prediction head to match target feature dimensions
-            self.decoder_pred = nn.Linear(self.decoder_blocks[-1].norm2.normalized_shape[0], feature_dim, bias=True)
+            # self.feature_pred = nn.Linear(feature_dim, feature_dim, bias=True)
+            # --------------------------------------------------------------------------
+            # Feature predict specifics
+            num_patches = self.patch_embed.num_patches
+            self.feature_embed = nn.Linear(embed_dim, feature_embed_dim, bias=True)
+
+            self.feature_mask_token = nn.Parameter(torch.zeros(1, 1, feature_embed_dim))
+
+            self.feature_pos_embed = nn.Parameter(
+                torch.zeros(1, num_patches + 1, feature_embed_dim), requires_grad=False
+            )  # fixed sin-cos embedding
+
+            feature_dpr = [x.item() for x in torch.linspace(0, drop_path_rate, feature_depth)]
+            self.feature_blocks = nn.ModuleList(
+                [
+                    Block(
+                        decoder_embed_dim,
+                        decoder_num_heads,
+                        mlp_ratio,
+                        qkv_bias=True,
+                        norm_layer=norm_layer,
+                        drop_path=feature_dpr[i],
+                    )
+                    for i in range(feature_depth)
+                ]
+            )
+
+            self.feature_norm = norm_layer(decoder_embed_dim)
+            self.feature_pred = nn.Linear(decoder_embed_dim, patch_size**2 * in_chans * 4, bias=True)
+            # --------------------------------------------------------------------------
 
             # Freeze the target encoder
             for param in self.target_encoder.parameters():
                 param.requires_grad = False
 
-    def extract_target_features(self, imgs, mask_ratio=0):
+    def extract_target_features(self, imgs, mask, ids_restore=None):
         """Extract features from the target encoder to use as reconstruction targets"""
         if self.target_encoder is None:
             # If no target encoder is provided, use pixel values as in original MAE
             return self.patchify(imgs)
 
+        target_encoder = self.target_encoder
         with torch.no_grad():
-            # Forward pass through target encoder without masking (mask_ratio=0)
-            x = self.target_encoder.patch_embed(imgs) + self.target_encoder.pos_embed[:, 2:, :]
-
-            # No masking for target feature extraction
-            # Append cls token
-            cls_token = self.target_encoder.cls_token + self.target_encoder.pos_embed[:, :1, :]
+            target_encoder.eval()
+            x = target_encoder.patch_embed(imgs)
+            cls_token = target_encoder.cls_token + self.pos_embed[:, :1, :]
             x = torch.cat((cls_token.expand(x.shape[0], -1, -1), x), dim=1)
 
-            # Pass through encoder blocks up to the target layer
-            for i, blk in enumerate(self.target_encoder.blocks):
+            for i, blk in enumerate(target_encoder.blocks):
                 x = blk(x)
-                if i == self.target_layer_index:
-                    break
 
-            # Apply norm layer
-            features = self.target_encoder.norm(x)
+            return x[:, 1:]
 
-            # Return only patch features (exclude cls token)
-            return features[:, 1:, :]
+    def forward(self, imgs, mask_ratio=0.75):
+        latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
+        if self.target_encoder is not None:
+            with torch.no_grad():
+                feature_target = self.extract_target_features(imgs, mask, ids_restore)
+            feature_pred = self.forward_features(latent, ids_restore)
+            # print(f"feature_target shape: {feature_target.shape}")
+            # print(f"feature_pred shape: {feature_pred.shape}")
+            pred = self.forward_decoder(latent, ids_restore)
+            loss = self.forward_loss(imgs, pred, mask, feature_target, feature_pred)
+        else:
+            pred = self.forward_decoder(latent, ids_restore)
+            loss = self.forward_loss(imgs, pred, mask)
+        return loss, pred, mask
 
-    def forward_loss(self, imgs, pred, mask):
-        # Get target features from the target encoder
-        target = self.extract_target_features(imgs)
+    def forward_loss(self, imgs, pred, mask, feature_target=None, feature_pred=None):
+        reconstruct_loss = super().forward_loss(imgs, pred, mask)
 
-        if self.target_encoder is None and self.norm_pix_loss:
-            # Only normalize pixel values if using pixel reconstruction (no target encoder)
-            mean = target.mean(dim=-1, keepdim=True)
-            var = target.var(dim=-1, keepdim=True)
-            target = (target - mean) / (var + 1.0e-6) ** 0.5
+        feature_loss = 0
+        if feature_target is not None:
+            # Compute feature loss using L2 distance
+            feature_loss = torch.mean((feature_pred - feature_target) ** 2)
 
-        # MSE loss between predicted features and target features
-        loss = (pred - target) ** 2
-        loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
+        return reconstruct_loss + feature_loss
 
-        return (loss * mask).sum() / mask.sum()
+    def forward_features(self, x, ids_restore):
+        # embed tokens
+        x = self.feature_embed(x)
+
+        # append mask tokens to sequence
+        mask_tokens = self.feature_mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
+        # assert x.shape == (-1, 1, 256, 256), f"Shape is {ids_restore.shape}"
+        x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)  # no cls token
+        # assert x.shape == (-1, 1, 256, 256), f"Shape is {x.shape, x_.shape}"
+        x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))  # unshuffle
+        x = torch.cat([x[:, :1, :], x_], dim=1)  # append cls token
+
+        # add pos embed
+        x = x + self.feature_pos_embed
+
+        # apply Transformer blocks
+        for blk in self.feature_blocks:
+            x = blk(x)
+        x = self.feature_norm(x)
+
+        # predictor projection
+        x = self.feature_pred(x)
+
+        return x[:, 1:]
+
+    def state_dict(self, *args, **kwargs):
+        state_dict = super().state_dict(*args, **kwargs)
+        # remove target encoder from state dict, to avoid size inflation when saving
+        if self.target_encoder is not None:
+            for key in list(state_dict.keys()):
+                if key.startswith("target_encoder.") or key.startswith("feature"):
+                    state_dict.pop(key)
+
+        return state_dict
 
 
 def bmae_deit_tiny_patch4_dec512d8b(**kwargs):
@@ -101,175 +199,3 @@ def bmae_deit_tiny_patch4_dec512d8b(**kwargs):
 
 
 bmae_deit_tiny_patch4 = bmae_deit_tiny_patch4_dec512d8b
-
-
-def train_bootstrapped_mae(
-    data_loader,
-    num_bootstraps=3,
-    mask_ratio=0.75,
-    img_size=32,
-    patch_size=4,
-    in_chans=3,
-    embed_dim=768,
-    depth=12,
-    num_heads=12,
-    decoder_embed_dim=512,
-    decoder_depth=8,
-    decoder_num_heads=16,
-    target_layer_index=-1,
-    epochs_per_bootstrap=100,
-    learning_rate=1.5e-4,
-    weight_decay=0.05,
-    device="cuda",
-    save_path="./bootstrapped_mae_checkpoints",
-):
-    """Train a series of bootstrapped MAEs where each one uses the previous MAE's encoder as target"""
-    import os
-    from torch.optim import AdamW
-    from torch.optim.lr_scheduler import CosineAnnealingLR
-
-    os.makedirs(save_path, exist_ok=True)
-
-    models = []
-
-    # First MAE is a regular MAE (MAE-1)
-    print(f"Bootstrap 1/{num_bootstraps}: Training regular MAE")
-    model = MaskedAutoencoderDeiT(
-        img_size=img_size,
-        patch_size=patch_size,
-        in_chans=in_chans,
-        embed_dim=embed_dim,
-        depth=depth,
-        num_heads=num_heads,
-        decoder_embed_dim=decoder_embed_dim,
-        decoder_depth=decoder_depth,
-        decoder_num_heads=decoder_num_heads,
-    ).to(device)
-    model_without_ddp = model
-
-    optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    scheduler = CosineAnnealingLR(optimizer, T_max=epochs_per_bootstrap)
-
-    # Train MAE-1
-    for epoch in range(epochs_per_bootstrap):
-        model.train()
-        total_loss = 0
-        num_batches = 0
-
-        for iter, batch in enumerate(data_loader):
-            imgs = batch[0].to(device)
-            optimizer.zero_grad()
-
-            loss, _, _ = model(imgs, mask_ratio=mask_ratio)
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-            num_batches += 1
-            if iter % 10 == 0:
-                print(f"Batch {iter}, Loss: {loss.item():.4f}")
-
-        scheduler.step()
-        avg_loss = total_loss / num_batches
-        print(f"Bootstrap 1, Epoch {epoch+1}/{epochs_per_bootstrap}, Loss: {avg_loss:.4f}")
-        misc.save_model(
-            args=args,
-            model=model,
-            model_without_ddp=model_without_ddp,
-            optimizer=optimizer,
-            loss_scaler=loss_scaler,
-            epoch=epoch,
-        )
-
-    # Save MAE-1
-    torch.save(model.state_dict(), os.path.join(save_path, "mae_1.pth"))
-    models.append(model)
-
-    # Train subsequent bootstrapped MAEs (MAE-2 to MAE-k)
-    for k in range(2, num_bootstraps + 1):
-        print(f"Bootstrap {k}/{num_bootstraps}: Training bootstrapped MAE with target encoder from bootstrap {k-1}")
-
-        # Use previous MAE's encoder as the target
-        target_encoder = models[-1]
-
-        # Create new bootstrapped MAE
-        bootstrap_model = BootstrappedMaskedAutoencoderDeiT(
-            target_encoder=target_encoder,
-            target_layer_index=target_layer_index,
-            img_size=img_size,
-            patch_size=patch_size,
-            in_chans=in_chans,
-            embed_dim=embed_dim,
-            depth=depth,
-            num_heads=num_heads,
-            decoder_embed_dim=decoder_embed_dim,
-            decoder_depth=decoder_depth,
-            decoder_num_heads=decoder_num_heads,
-        ).to(device)
-
-        optimizer = AdamW(bootstrap_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-        scheduler = CosineAnnealingLR(optimizer, T_max=epochs_per_bootstrap)
-
-        # Train bootstrapped MAE
-        for epoch in range(epochs_per_bootstrap):
-            bootstrap_model.train()
-            total_loss = 0
-            num_batches = 0
-
-            for batch in data_loader:
-                imgs = batch[0].to(device)
-                optimizer.zero_grad()
-
-                loss, _, _ = bootstrap_model(imgs, mask_ratio=mask_ratio)
-                loss.backward()
-                optimizer.step()
-
-                total_loss += loss.item()
-                num_batches += 1
-
-            scheduler.step()
-            avg_loss = total_loss / num_batches
-            print(f"Bootstrap {k}, Epoch {epoch+1}/{epochs_per_bootstrap}, Loss: {avg_loss:.4f}")
-
-        # Save bootstrapped MAE
-        torch.save(bootstrap_model.state_dict(), os.path.join(save_path, f"mae_{k}.pth"))
-        models.append(bootstrap_model)
-
-    print(f"Finished training {num_bootstraps} bootstrapped MAEs.")
-    return models[-1]  # Return the final bootstrapped MAE (MAE-k)
-
-
-# Example usage:
-def main():
-    import torch
-    from torch.utils.data import DataLoader
-    from torchvision import datasets, transforms
-
-    # Set up data loading
-    transform = transforms.Compose(
-        [transforms.Resize(32), transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
-    )
-
-    # Example with CIFAR-10 dataset
-    dataset = datasets.CIFAR10(root="./datasets01/cifar10", train=True, download=True, transform=transform)
-    data_loader = DataLoader(dataset, batch_size=128, shuffle=True, num_workers=4)
-
-    # Train bootstrapped MAE
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    final_model = train_bootstrapped_mae(
-        data_loader=data_loader,
-        num_bootstraps=3,  # Train MAE-1, MAE-2, and MAE-3
-        mask_ratio=0.75,
-        img_size=32,
-        patch_size=4,
-        epochs_per_bootstrap=10,  # Reduce for demonstration
-        device=device,
-    )
-
-    # Save the final model
-    torch.save(final_model.state_dict(), "bootstrapped_mae_final.pth")
-    print("Final bootstrapped MAE model saved.")
-
-
-if __name__ == "__main__":
-    main()

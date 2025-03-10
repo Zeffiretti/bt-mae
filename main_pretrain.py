@@ -248,7 +248,11 @@ def main(args):
             )
             model_without_ddp = bootstrapped_model
             print(f"Bootstrap {bootstrap_idx} training: Train MAE-{bootstrap_idx}")
-            optimizer = torch.optim.AdamW(bootstrapped_model.parameters(), lr=args.lr, betas=(0.9, 0.95))
+
+            print("Model = %s" % str(model_without_ddp))
+
+            param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
+            optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
             loss_scaler = NativeScaler()
             print(optimizer)
         if args.distributed:

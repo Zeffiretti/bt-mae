@@ -342,7 +342,7 @@ def create_model(model_init: callable, args, bootstrap=False, target_encoder=Non
     if bootstrap:
         assert target_encoder is not None, "target_encoder must be provided for bootstrapping"
         model = model_init(norm_pix_loss=args.norm_pix_loss, target_encoder=target_encoder)
-        # model.load_state_dict(target_encoder.state_dict())
+        model.load_state_dict(target_encoder.state_dict(), strict=False)
     else:
         model = model_init(norm_pix_loss=args.norm_pix_loss)
     model.to(device)
