@@ -263,7 +263,7 @@ def main(args):
             data_loader_train,
             optimizer,
             device,
-            epoch - bootstrapped_start_epoch,
+            epoch,
             loss_scaler,
             log_writer=log_writer,
             args=args,

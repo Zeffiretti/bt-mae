@@ -74,7 +74,7 @@ def get_args_parser():
     parser.add_argument(
         "--blr",
         type=float,
-        default=1e-3,
+        default=1e-2,
         metavar="LR",
         help="base learning rate: absolute_lr = base_lr * total_batch_size / 256",
     )
@@ -431,7 +431,7 @@ def main(args):
 if __name__ == "__main__":
     args = get_args_parser()
     args = args.parse_args()
-    if args.output_dir:
+    if args.output_dir and not args.eval:
         current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         args.output_dir = os.path.join(args.output_dir, current_time)
         if args.log_dir:

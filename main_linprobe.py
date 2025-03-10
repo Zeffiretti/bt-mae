@@ -68,7 +68,7 @@ def get_args_parser():
     parser.add_argument(
         "--blr",
         type=float,
-        default=0.1,
+        default=3,
         metavar="LR",
         help="base learning rate: absolute_lr = base_lr * total_batch_size / 256",
     )

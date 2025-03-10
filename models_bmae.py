@@ -9,7 +9,7 @@ from timm.models.vision_transformer import PatchEmbed, Block, Attention, Mlp, Dr
 from util.pos_embed import get_2d_sincos_pos_embed
 
 
-class BootstrappedMaskedAutoencoderDeiT(MaskedAutoencoderDeiT):
+class BootMAEDeiT(MaskedAutoencoderDeiT):
     """Bootstrapped Masked Autoencoder with DeiT backbone
 
     This implementation extends the original MAE to use features from a pretrained
@@ -19,7 +19,7 @@ class BootstrappedMaskedAutoencoderDeiT(MaskedAutoencoderDeiT):
     def __init__(
         self,
         target_encoder=None,  # Pretrained MAE encoder to extract target features
-        target_layer_index=6,  # Which encoder layer to extract features from (-1 means the last layer)
+        target_layer_index=-1,  # Which encoder layer to extract features from (-1 means the last layer)
         feature_dim=None,  # Dimension of target encoder features (if None, use patch_size^2 * in_chans)
         img_size=32,
         patch_size=4,
@@ -266,7 +266,7 @@ class BootstrappedMaskedAutoencoderDeiT(MaskedAutoencoderDeiT):
 
 
 def bmae_deit_tiny_patch4_dec512d8b(**kwargs):
-    model = BootstrappedMaskedAutoencoderDeiT(
+    model = BootMAEDeiT(
         patch_size=4,
         embed_dim=192,
         depth=12,
