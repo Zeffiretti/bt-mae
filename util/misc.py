@@ -341,7 +341,11 @@ def load_model(args, model_without_ddp, optimizer, loss_scaler):
 def create_model(model_init: callable, args, bootstrap=False, target_encoder=None, device="cuda"):
     if bootstrap:
         assert target_encoder is not None, "target_encoder must be provided for bootstrapping"
-        model = model_init(norm_pix_loss=args.norm_pix_loss, target_encoder=target_encoder)
+        model = model_init(
+            norm_pix_loss=args.norm_pix_loss,
+            target_encoder=target_encoder,
+            use_new_feature_predictor=args.use_new_feature_predictor,
+        )
         # remove decoder params
         state_dict = target_encoder.state_dict()
         for key, _ in list(state_dict.items()):
@@ -350,7 +354,11 @@ def create_model(model_init: callable, args, bootstrap=False, target_encoder=Non
                 del state_dict[key]
         model.load_state_dict(state_dict, strict=False)
     else:
-        model = model_init(norm_pix_loss=args.norm_pix_loss, enable_ema=args.enable_ema)
+        model = model_init(
+            norm_pix_loss=args.norm_pix_loss,
+            enable_ema=args.enable_ema,
+            use_new_feature_predictor=args.use_new_feature_predictor,
+        )
     model.to(device)
     return model
 

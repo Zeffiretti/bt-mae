@@ -50,6 +50,9 @@ def get_args_parser():
     parser.add_argument("--enable_ema", action="store_true", help="Enable exponential moving average")
     parser.set_defaults(enable_ema=False)
     parser.add_argument("--ema_decay", default=0.9999, type=float, help="Decay factor for EMA")
+    parser.add_argument("--use_new_feature_predictor", action="store_true", help="Use new feature predictor")
+    parser.set_defaults(use_new_feature_predictor=False)
+    parser.add_argument("--feature_class", default="latent", type=str, help="Feature class to predict")  # latent or hog
 
     parser.add_argument(
         "--accum_iter",
@@ -331,4 +334,7 @@ if __name__ == "__main__":
         if args.log_dir:
             args.log_dir = os.path.join(args.log_dir, current_time)
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+        args_text = json.dumps(args.__dict__, indent=2)
+        with open(os.path.join(args.output_dir, "args.txt"), "w") as f:
+            f.write(args_text)
     main(args)

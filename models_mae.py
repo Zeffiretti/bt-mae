@@ -527,6 +527,20 @@ class MaskedAutoencoderDeiT(nn.Module):
         x = torch.einsum("nchpwq->nhwpqc", x)
         return x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
 
+    def unpatchify(self, x):
+        """
+        x: (N, L, patch_size**2 *3)
+        imgs: (N, 3, H, W)
+        """
+        p = self.patch_embed.patch_size[0]
+        h = w = int(x.shape[1] ** 0.5)
+        assert h * w == x.shape[1]
+
+        x = x.reshape(shape=(x.shape[0], h, w, p, p, 3))
+        x = torch.einsum("nhwpqc->nchpwq", x)
+        imgs = x.reshape(shape=(x.shape[0], 3, h * p, h * p))
+        return imgs
+
     def random_masking(self, x, mask_ratio):
         N, L, D = x.shape
         len_keep = int(L * (1 - mask_ratio))

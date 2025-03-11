@@ -3,3 +3,5 @@ output/
 log/
 datasets01/
 __pycache__/
+checkpoints/
+results/
