@@ -41,7 +41,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser("MAE pre-training", add_help=False)
     parser.add_argument(
         "--batch_size",
-        default=64,
+        default=256,
         type=int,
         help="Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus",
     )
@@ -53,6 +53,7 @@ def get_args_parser():
     parser.add_argument("--use_new_feature_predictor", action="store_true", help="Use new feature predictor")
     parser.set_defaults(use_new_feature_predictor=False)
     parser.add_argument("--feature_class", default="latent", type=str, help="Feature class to predict")  # latent or hog
+    parser.add_argument("--target_layer_index", default=-1, type=int, help="Target layer index for feature prediction")
 
     parser.add_argument(
         "--accum_iter",
@@ -96,6 +97,9 @@ def get_args_parser():
     parser.add_argument("--data_path", default="./datasets01/cifar10/", type=str, help="dataset path")
 
     parser.add_argument("--output_dir", default="./output/pretrain_dir", help="path where to save, empty for no saving")
+    parser.add_argument(
+        "--save_checkpoint", default="./checkpoints/pretrain", help="path where to save, empty for no saving"
+    )
     parser.add_argument("--log_dir", default="./log/pretrain_dir", help="path where to tensorboard log")
     parser.add_argument("--device", default="cuda", help="device to use for training / testing")
     parser.add_argument("--seed", default=0, type=int)
@@ -175,6 +179,7 @@ def main(args):
     if args.enable_ema:
         print("Enable EMA")
         args.num_bootstrap = 1  # At most one mode at the same time
+        args.use_new_feature_predictor = True
 
     # define the model
     if args.model.startswith("bmae"):
@@ -243,15 +248,15 @@ def main(args):
         )
 
         if args.output_dir and ((epoch + 1) % epoches_per_bootstrap == 0 or epoch + 1 == args.epochs):
-            misc.save_model(
-                args=args,
-                model=model,
-                model_without_ddp=model_without_ddp,
-                optimizer=optimizer,
-                loss_scaler=loss_scaler,
-                epoch=epoch,
-                bootstrap_idx=1,
-            )
+            # misc.save_model(
+            #     args=args,
+            #     model=model,
+            #     model_without_ddp=model_without_ddp,
+            #     optimizer=optimizer,
+            #     loss_scaler=loss_scaler,
+            #     epoch=epoch,
+            #     bootstrap_idx=1,
+            # )
             trained_models.append(model)
 
         log_stats = {
@@ -264,6 +269,28 @@ def main(args):
                 log_writer.flush()
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
+
+    args.acc = 0
+    if args.save_checkpoint:
+        if args.enable_ema or args.num_bootstrap == 1:
+            misc.save_model(
+                args=args,
+                model=model,
+                model_without_ddp=model_without_ddp,
+                optimizer=optimizer,
+                loss_scaler=loss_scaler,
+                epoch=epoch,
+                bootstrap_idx=1,
+            )
+        # misc.save_model(
+        #     args=args,
+        #     model=model,
+        #     model_without_ddp=model_without_ddp,
+        #     optimizer=optimizer,
+        #     loss_scaler=loss_scaler,
+        #     epoch=epoch,
+        #     bootstrap_idx=1,
+        # )
 
     bootstrapped_start_epoch = epoches_per_bootstrap
     for epoch in range(epoches_per_bootstrap, args.epochs):
@@ -298,15 +325,15 @@ def main(args):
         )
 
         if args.output_dir and ((epoch + 1) % epoches_per_bootstrap == 0 or epoch + 1 == args.epochs):
-            misc.save_model(
-                args=args,
-                model=model,
-                model_without_ddp=model_without_ddp,
-                optimizer=optimizer,
-                loss_scaler=loss_scaler,
-                epoch=epoch,
-                bootstrap_idx=bootstrap_idx,
-            )
+            # misc.save_model(
+            #     args=args,
+            #     model=model,
+            #     model_without_ddp=model_without_ddp,
+            #     optimizer=optimizer,
+            #     loss_scaler=loss_scaler,
+            #     epoch=epoch,
+            #     bootstrap_idx=bootstrap_idx,
+            # )
             trained_models.append(bootstrapped_model)
 
         log_stats = {
@@ -323,6 +350,16 @@ def main(args):
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print("Training time {}".format(total_time_str))
+    if args.save_checkpoint:
+        misc.save_model(
+            args=args,
+            model=model,
+            model_without_ddp=model_without_ddp,
+            optimizer=optimizer,
+            loss_scaler=loss_scaler,
+            epoch=epoch,
+            bootstrap_idx=1,
+        )
 
 
 if __name__ == "__main__":
@@ -337,4 +374,6 @@ if __name__ == "__main__":
         args_text = json.dumps(args.__dict__, indent=2)
         with open(os.path.join(args.output_dir, "args.txt"), "w") as f:
             f.write(args_text)
+    if args.save_checkpoint:
+        Path(args.save_checkpoint).mkdir(parents=True, exist_ok=True)
     main(args)

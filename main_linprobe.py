@@ -95,6 +95,9 @@ def get_args_parser():
     parser.add_argument("--nb_classes", default=10, type=int, help="number of the classification types")
 
     parser.add_argument("--output_dir", default="./output/linprobe_dir", help="path where to save, empty for no saving")
+    parser.add_argument(
+        "--save_checkpoint", default="./checkpoints/linprobe", help="path where to save, empty for no saving"
+    )
     parser.add_argument("--log_dir", default="./log/linprobe_dir", help="path where to tensorboard log")
     parser.add_argument("--device", default="cuda", help="device to use for training / testing")
     parser.add_argument("--seed", default=0, type=int)
@@ -329,15 +332,6 @@ def main(args):
             log_writer=log_writer,
             args=args,
         )
-    if args.output_dir:
-        misc.save_model(
-            args=args,
-            model=model,
-            model_without_ddp=model_without_ddp,
-            optimizer=optimizer,
-            loss_scaler=loss_scaler,
-            epoch=epoch,
-        )
 
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
@@ -362,6 +356,18 @@ def main(args):
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
+    args.acc = f'{test_stats["acc1"]:0.2f}'
+
+    if args.output_dir:
+        misc.save_model(
+            args=args,
+            model=model,
+            model_without_ddp=model_without_ddp,
+            optimizer=optimizer,
+            loss_scaler=loss_scaler,
+            epoch=epoch,
+        )
+
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print("Training time {}".format(total_time_str))
@@ -370,12 +376,35 @@ def main(args):
 if __name__ == "__main__":
     args = get_args_parser()
     args = args.parse_args()
+
+    if args.finetune:
+        if "ema" in args.finetune:
+            args.enable_ema = True
+            # parse ema decay in "pretrain-ema0.999-newfp-layer12.pth" format
+            ema_decay = float(args.finetune.split("-")[1][3:])
+            args.ema_decay = ema_decay
+            args.num_bootstrap = 0
+        else:
+            args.enable_ema = False
+            num_boost = int(args.finetune.split("-")[1][1:])
+            args.num_bootstrap = num_boost
+        if "newfp" in args.finetune:
+            args.use_new_feature_predictor = True
+        else:
+            args.use_new_feature_predictor = False
+        if "layer" in args.finetune:
+            target_layer_index = int(args.finetune.split("-")[-1].split(".")[0][5:])
+            args.target_layer_index = target_layer_index
+        elif "hog" in args.finetune:
+            args.target_layer_index = 999
     if args.output_dir:
         current_time = datetime.datetime.now().strftime("%b%d_%H-%M-%S")
         args.output_dir = os.path.join(args.output_dir, current_time)
         if args.log_dir:
             args.log_dir = os.path.join(args.log_dir, current_time)
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    if args.save_checkpoint:
+        Path(args.save_checkpoint).mkdir(parents=True, exist_ok=True)
     args_text = json.dumps(args.__dict__, indent=2)
     with open(os.path.join(args.output_dir, "args.txt"), "w") as f:
         f.write(args_text)

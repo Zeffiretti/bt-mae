@@ -299,11 +299,25 @@ def get_grad_norm_(parameters, norm_type: float = 2.0) -> torch.Tensor:
 
 
 def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, bootstrap_idx=None):
-    output_dir = Path(args.output_dir)
+    if args.save_checkpoint:
+        output_dir = Path(args.save_checkpoint)
+    else:
+        output_dir = Path(args.output_dir)
     epoch_name = str(epoch)
     bootstrap_name = str(bootstrap_idx) if bootstrap_idx is not None else "none"
     if loss_scaler is not None:
-        checkpoint_paths = [output_dir / ("checkpoint-%s-%s.pth" % (bootstrap_name, epoch_name))]
+        # checkpoint_paths = [output_dir / ("checkpoint-%s-%s.pth" % (bootstrap_name, epoch_name))]
+        if args.enable_ema:
+            bootstrap_name = f"ema{args.ema_decay}"
+        elif args.num_bootstrap >= 1:
+            bootstrap_name = f"k{args.num_bootstrap}"
+        if args.use_new_feature_predictor:
+            bootstrap_name += "-newfp"
+        target_layer_index = args.target_layer_index
+        bootstrap_name += f"-layer{target_layer_index}"
+        if args.acc:
+            bootstrap_name += f"-acc{args.acc}"
+        checkpoint_paths = [output_dir / ("checkpoint-%s.pth" % bootstrap_name)]
         for checkpoint_path in checkpoint_paths:
             to_save = {
                 "model": model_without_ddp.state_dict(),
@@ -317,6 +331,12 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, bo
             save_on_master(to_save, checkpoint_path)
     else:
         client_state = {"epoch": epoch, "bootstrap_idx": bootstrap_idx}
+        if args.enable_ema:
+            bootstrap_name = f"ema{args.ema_decay}"
+        elif args.num_bootstrap > 1:
+            bootstrap_name = f"k{bootstrap_idx}"
+        if args.use_new_feature_predictor:
+            bootstrap_name += "-newfp"
         model.save_checkpoint(
             save_dir=args.output_dir, tag="checkpoint-%s-%s" % (bootstrap_name, epoch_name), client_state=client_state
         )
@@ -346,6 +366,7 @@ def create_model(model_init: callable, args, bootstrap=False, target_encoder=Non
             target_encoder=target_encoder,
             use_new_feature_predictor=args.use_new_feature_predictor,
             feature_class=args.feature_class,
+            target_layer_index=args.target_layer_index,
         )
         # remove decoder params
         state_dict = target_encoder.state_dict()
@@ -360,6 +381,7 @@ def create_model(model_init: callable, args, bootstrap=False, target_encoder=Non
             enable_ema=args.enable_ema,
             use_new_feature_predictor=args.use_new_feature_predictor,
             feature_class=args.feature_class,
+            target_layer_index=args.target_layer_index,
         )
     model.to(device)
     return model
