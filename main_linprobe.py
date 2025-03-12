@@ -329,15 +329,15 @@ def main(args):
             log_writer=log_writer,
             args=args,
         )
-        if args.output_dir:
-            misc.save_model(
-                args=args,
-                model=model,
-                model_without_ddp=model_without_ddp,
-                optimizer=optimizer,
-                loss_scaler=loss_scaler,
-                epoch=epoch,
-            )
+    if args.output_dir:
+        misc.save_model(
+            args=args,
+            model=model,
+            model_without_ddp=model_without_ddp,
+            optimizer=optimizer,
+            loss_scaler=loss_scaler,
+            epoch=epoch,
+        )
 
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
@@ -376,4 +376,7 @@ if __name__ == "__main__":
         if args.log_dir:
             args.log_dir = os.path.join(args.log_dir, current_time)
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    args_text = json.dumps(args.__dict__, indent=2)
+    with open(os.path.join(args.output_dir, "args.txt"), "w") as f:
+        f.write(args_text)
     main(args)

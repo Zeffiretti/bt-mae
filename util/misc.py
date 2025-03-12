@@ -345,6 +345,7 @@ def create_model(model_init: callable, args, bootstrap=False, target_encoder=Non
             norm_pix_loss=args.norm_pix_loss,
             target_encoder=target_encoder,
             use_new_feature_predictor=args.use_new_feature_predictor,
+            feature_class=args.feature_class,
         )
         # remove decoder params
         state_dict = target_encoder.state_dict()
@@ -358,6 +359,7 @@ def create_model(model_init: callable, args, bootstrap=False, target_encoder=Non
             norm_pix_loss=args.norm_pix_loss,
             enable_ema=args.enable_ema,
             use_new_feature_predictor=args.use_new_feature_predictor,
+            feature_class=args.feature_class,
         )
     model.to(device)
     return model

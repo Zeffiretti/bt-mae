@@ -1,12 +1,64 @@
 from functools import partial
 import torch
 from torch import nn
+from torch.nn import functional as F
+import numpy as np
 
 from models_mae import MaskedAutoencoderDeiT
 from util import misc
 from timm.models.vision_transformer import PatchEmbed, Block, Attention, Mlp, DropPath
 
 from util.pos_embed import get_2d_sincos_pos_embed
+
+
+def compute_hog_pytorch(img, num_bins=9, cell_size=8):
+    """
+    Computes a differentiable HOG feature in PyTorch.
+
+    Args:
+        img (torch.Tensor): Input tensor of shape (N, C, H, W) with requires_grad=True
+        num_bins (int): Number of orientation bins
+        cell_size (int): Size of each cell (HOG parameter)
+
+    Returns:
+        hog_features (torch.Tensor): Extracted HOG features
+    """
+
+    # Convert to grayscale if RGB
+    if img.shape[1] == 3:  # Assume (N, C, H, W)
+        img = 0.299 * img[:, 0, :, :] + 0.587 * img[:, 1, :, :] + 0.114 * img[:, 2, :, :]  # Convert to grayscale
+        img = img.unsqueeze(1)  # Restore channel dimension (N, 1, H, W)
+
+    # Compute gradient using Sobel filter
+    sobel_x = torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]]).view(1, 1, 3, 3).to(img.device)
+    sobel_y = torch.tensor([[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]]).view(1, 1, 3, 3).to(img.device)
+
+    gx = F.conv2d(img, sobel_x, padding=1)
+    gy = F.conv2d(img, sobel_y, padding=1)
+
+    # Compute gradient magnitude and orientation
+    magnitude = torch.sqrt(gx**2 + gy**2 + 1e-6)  # Avoid division by zero
+    orientation = torch.atan2(gy, gx)  # Angle in radians
+
+    # Convert orientation to histogram bins (0 to π)
+    orientation_bins = torch.floor((orientation + np.pi) * (num_bins / (2 * np.pi))).long()
+    orientation_bins = torch.clamp(orientation_bins, 0, num_bins - 1)
+
+    # Compute HOG features per cell
+    h, w = img.shape[2], img.shape[3]
+    cells_x, cells_y = h // cell_size, w // cell_size
+    hog_features = torch.zeros((img.shape[0], num_bins, cells_x, cells_y), device=img.device)
+
+    for i in range(cells_x):
+        for j in range(cells_y):
+            cell_mag = magnitude[:, :, i * cell_size : (i + 1) * cell_size, j * cell_size : (j + 1) * cell_size]
+            cell_ori = orientation_bins[:, :, i * cell_size : (i + 1) * cell_size, j * cell_size : (j + 1) * cell_size]
+
+            for b in range(num_bins):
+                # Ensure correct dimension after summation
+                hog_features[:, b, i, j] = torch.sum(cell_mag * (cell_ori == b).float(), dim=(2, 3)).squeeze(-1)
+
+    return hog_features.view(img.shape[0], -1)  # Flatten to vector
 
 
 class BootMAEDeiT(MaskedAutoencoderDeiT):
@@ -34,7 +86,7 @@ class BootMAEDeiT(MaskedAutoencoderDeiT):
         norm_layer=nn.LayerNorm,
         norm_pix_loss=False,
         # Deit specific params
-        feature_classs="latent",  # latent or hog
+        feature_class="latent",  # latent or hog
         layer_scale_init_value=1e-5,
         drop_path_rate=0.0,
         enable_ema=False,
@@ -60,15 +112,27 @@ class BootMAEDeiT(MaskedAutoencoderDeiT):
 
         self.target_encoder = target_encoder
         self.target_layer_index = target_layer_index
-        self.feature_class = feature_classs
+        self.feature_class = feature_class
 
         self.enable_ema = enable_ema
-        print(f"Use new feature predictor: {use_new_feature_predictor}")
         self.use_new_feature_decoder = use_new_feature_predictor
+
+        if self.feature_class == "hog":
+            print("Using HOG features")
+        #     feature_dim = get_hog_feature_size(img_size)
+        #     print(f"Feature dimension for hog: {feature_dim}")
+        #     # self.decoder_pred = nn.Linear(self.decoder_blocks[-1].norm2.normalized_shape[0], feature_dim, bias=True)
+
+        #     # initialize nn.Linear and nn.LayerNorm
+        #     self.apply(self._init_weights)
+
         if target_encoder is not None:
             if feature_dim is None:
-                # Default to the same dimension as the encoder output
-                feature_dim = target_encoder.blocks[target_layer_index].norm2.normalized_shape[0]
+                if self.feature_class == "latent":
+                    # Default to the same dimension as the encoder output
+                    feature_dim = target_encoder.blocks[target_layer_index].norm2.normalized_shape[0]
+                elif self.feature_class == "hog":
+                    feature_dim = patch_size**2 * in_chans
             if not self.use_new_feature_decoder:
                 # Get feature dimension from the target encoder if not provided
 
@@ -230,17 +294,7 @@ class BootMAEDeiT(MaskedAutoencoderDeiT):
                 return features[:, 1:, :]
 
     def extract_hog_features(self, imgs):
-        from skimage.feature import hog
-        from skimage import color
-        import numpy as np
-
-        imgs = imgs.permute(0, 2, 3, 1).cpu().numpy()
-        features = []
-        for img in imgs:
-            img = color.rgb2gray(img)
-            feature = hog(img, block_norm="L2-Hys", pixels_per_cell=(16, 16))
-            features.append(feature)
-        return np.array(features)
+        return compute_hog_pytorch(imgs)
 
     def extract_features(self, imgs):
         if self.feature_class == "latent":
@@ -279,8 +333,15 @@ class BootMAEDeiT(MaskedAutoencoderDeiT):
 
             return loss.mean(), pred, mask
         else:
-
-            return super().forward(imgs, mask_ratio=mask_ratio)
+            latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
+            pred = self.forward_decoder(latent, ids_restore)
+            if self.feature_class == "hog":
+                pred_hog = self.unpatchify(pred)
+                pred_hog = compute_hog_pytorch(pred_hog)
+                loss = self.forward_loss(imgs, pred_hog, mask)
+            else:
+                loss = self.forward_loss(imgs, pred, mask)
+            return loss, pred, mask
 
     def forward_loss(self, imgs, pred, mask, feature_target=None, feature_pred=None):
         # target = self.extract_midlayer_features(imgs)
@@ -293,6 +354,7 @@ class BootMAEDeiT(MaskedAutoencoderDeiT):
             target = (target - mean) / (var + 1.0e-6) ** 0.5
 
         # MSE loss between predicted features and target features
+        # print(f"pred shape: {pred.shape}, target shape: {target.shape}")
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
 
