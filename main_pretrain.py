@@ -179,7 +179,7 @@ def main(args):
     if args.enable_ema:
         print("Enable EMA")
         args.num_bootstrap = 1  # At most one mode at the same time
-        args.use_new_feature_predictor = True
+        # args.use_new_feature_predictor = True
 
     # define the model
     if args.model.startswith("bmae"):

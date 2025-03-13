@@ -58,13 +58,13 @@ python main_pretrain.py --num_bootstrap 8 --use_new_feature_predictor --target_l
 
 python main_pretrain.py --enable_ema --target_layer_index 5 --ema_decay 0.9999
 python main_pretrain.py --enable_ema --target_layer_index 5 --ema_decay 0.999
-python main_pretrain.py --enable_ema --target_layer_index 5 --ema_decay 0.99
-python main_pretrain.py --enable_ema --target_layer_index 5 --ema_decay 0.9
+# python main_pretrain.py --enable_ema --target_layer_index 5 --ema_decay 0.99
+# python main_pretrain.py --enable_ema --target_layer_index 5 --ema_decay 0.9
 
-python main_pretrain.py --enable_ema --target_layer_index 11 --ema_decay 0.9999
-python main_pretrain.py --enable_ema --target_layer_index 11 --ema_decay 0.999
-python main_pretrain.py --enable_ema --target_layer_index 11 --ema_decay 0.99
-python main_pretrain.py --enable_ema --target_layer_index 11 --ema_decay 0.9
+# python main_pretrain.py --enable_ema --target_layer_index 11 --ema_decay 0.9999
+# python main_pretrain.py --enable_ema --target_layer_index 11 --ema_decay 0.999
+# python main_pretrain.py --enable_ema --target_layer_index 11 --ema_decay 0.99
+# python main_pretrain.py --enable_ema --target_layer_index 11 --ema_decay 0.9
 
 # iterate over the 'checkpoints/pretrain' directory
 for file in checkpoints/pretrain/*.pth; do
