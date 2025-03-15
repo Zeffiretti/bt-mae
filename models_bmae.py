@@ -308,7 +308,7 @@ class BootMAEDeiT(MaskedAutoencoderDeiT):
         # pred = self.forward_decoder(latent, ids_restore)
         # loss = self.forward_loss(imgs, pred, mask)  # reconstruct pixel loss
 
-        if self.use_new_feature_decoder:
+        if self.use_new_feature_decoder or self.enable_ema:
             latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
             pred = self.forward_decoder(latent, ids_restore)
             target = self.patchify(imgs)
