@@ -39,6 +39,7 @@ import models_vit
 import model_deit
 
 from engine_finetune import train_one_epoch, evaluate
+from loss import DistillationLoss
 
 
 def get_args_parser():
@@ -355,6 +356,9 @@ def main(args):
     )
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr)
     loss_scaler = NativeScaler()
+    teacher_model = timm.create_model("regnety_160", pretrained=True, num_classes=args.nb_classes)
+    teacher_model.to(device)
+    teacher_model.eval()
 
     if mixup_fn is not None:
         # smoothing is handled with mixup label transform
@@ -364,6 +368,7 @@ def main(args):
     else:
         criterion = torch.nn.CrossEntropyLoss()
 
+    criterion = DistillationLoss(criterion, teacher_model, distillation_type="soft", alpha=0.5, tau=1.0)
     print("criterion = %s" % str(criterion))
 
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)

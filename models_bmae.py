@@ -183,7 +183,7 @@ class BootMAEDeiT(MaskedAutoencoderDeiT):
         if self.enable_ema:
             # To keep MAE reconstruction ability, we need to keep the target decoder to learn pixel reconstruction
             # Meanwhile, we create new feature decoder to learn feature reconstruction (a shallow decoder)
-            self.use_new_feature_decoder = True
+            # self.use_new_feature_decoder = True
             self.target_encoder = None
 
             if feature_dim is None:

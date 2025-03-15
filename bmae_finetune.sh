@@ -1,0 +1,1 @@
+python main_finetune.py --finetune checkpoints/pretrain/checkpoint-k2-layer11.pth

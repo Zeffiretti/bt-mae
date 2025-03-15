@@ -62,12 +62,17 @@ def train_one_epoch(
 
         with torch.cuda.amp.autocast():
             outputs = model(samples)
-            if isinstance(outputs, torch.Tensor):
-                loss = criterion(outputs, targets)
-            else:
-                loss_cls = criterion(outputs[0], targets)
-                loss_dist = criterion(outputs[1], targets)
-                loss = loss_cls + 0.5 * loss_dist * 0.5
+            # if isinstance(outputs, torch.Tensor):
+            #     loss = criterion(outputs, targets)
+            # else:
+            loss = criterion(samples, outputs, targets)
+            # loss = 0.25 * criterion(outputs[0], targets)
+            # loss += 0.25 * criterion(outputs[1], targets)
+            # loss += 0.25 * criterion(outputs[0], outputs[1].detach().sigmoid())
+            # loss += 0.25 * criterion(outputs[1], outputs[0].detach().sigmoid())
+            # loss_cls = criterion(outputs[0], targets)
+            # loss_dist = criterion(outputs[1], targets)
+            # loss = loss_cls + 0.5 * loss_dist * 0.5
 
         loss_value = loss.item()
 

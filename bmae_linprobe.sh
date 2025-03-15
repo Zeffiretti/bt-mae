@@ -1,0 +1,1 @@
+python main_linprobe.py --finetune checkpoints/pretrain/checkpoint-k2-layer11.pth

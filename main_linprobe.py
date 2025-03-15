@@ -38,6 +38,7 @@ import models_vit
 import model_deit
 
 from engine_finetune import train_one_epoch, evaluate
+from loss import DistillationLoss
 
 
 def get_args_parser():
@@ -78,6 +79,20 @@ def get_args_parser():
     )
 
     parser.add_argument("--warmup_epochs", type=int, default=10, metavar="N", help="epochs to warmup LR")
+
+    # Distillation parameters
+    # Use regnety_160.tv2_in1k for teacher model
+    # parser.add_argument(
+    #     "--teacher-model",
+    #     default="regnety_160",
+    #     type=str,
+    #     metavar="MODEL",
+    #     help='Name of teacher model to train (default: "regnety_160"',
+    # )
+    # parser.add_argument("--teacher-path", type=str, default="")
+    # parser.add_argument("--distillation-type", default="none", choices=["none", "soft", "hard"], type=str, help="")
+    # parser.add_argument("--distillation-alpha", default=0.5, type=float, help="")
+    # parser.add_argument("--distillation-tau", default=1.0, type=float, help="")
 
     # * Finetuning params
     parser.add_argument("--finetune", default="", help="finetune from checkpoint")
@@ -303,7 +318,13 @@ def main(args):
     print(optimizer)
     loss_scaler = NativeScaler()
 
+    teacher_model = timm.create_model("regnety_160", pretrained=True, num_classes=args.nb_classes)
+    teacher_model.to(device)
+    teacher_model.eval()
+
     criterion = torch.nn.CrossEntropyLoss()
+
+    criterion = DistillationLoss(criterion, teacher_model, distillation_type="soft", alpha=0.5, tau=1.0)
 
     print("criterion = %s" % str(criterion))
 
